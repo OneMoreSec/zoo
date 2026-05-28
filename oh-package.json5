@@ -1,0 +1,10 @@
+{
+  "app": {
+    "compileSdkVersion": 9,
+    "compatibleSdkVersion": 9
+  },
+  "module": {
+    "compileSdkVersion": 9,
+    "compatibleSdkVersion": 9
+  }
+}

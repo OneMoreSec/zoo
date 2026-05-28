@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Zoo Framework - JSON-based MVVM framework for OpenHarmony"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Zoo Framework Entry"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Zoo"
+    }
+  ]
+}
