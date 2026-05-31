@@ -1,40 +1,66 @@
 import { ZooLogger } from '../common/ZooLogger'
-import { ZooParser } from './ZooParser'
-import { ZooTemplate, PageResult } from './ZooTemplate'
+import { ZooTemplate, ZNode, DataModel } from './ZooTemplate'
 import { ZooManager } from './ZooManager'
 import { TemplateRegistry } from './TemplateRegistry'
+import { ZNodeTreeBuilder } from './ZNodeTreeBuilder'
 import {
   Column,
   Row,
   Stack,
-  Flex,
   Text,
   Image,
   Button,
+  LoadingProgress,
+  Flex,
   TextInput,
   Checkbox,
   Radio,
   Switch,
   Slider,
   Progress,
-  LoadingProgress,
   Divider,
   Badge,
   SymbolGlyph
 } from '@kit.ArkUI'
 import { Length } from '@kit.ArkGraphics2D'
 
+/**
+ * 样式转换器 - 将JSON样式转换为ArkUI属性
+ */
+class StyleConverter {
+  static convert(style: any): any {
+    if (!style) return {}
+    const converted: any = {}
+
+    for (const key in style) {
+      const value = style[key]
+      const arkKey = this.camelCase(key)
+      
+      if (key.includes('-')) {
+        converted[arkKey] = value
+      } else {
+        converted[key] = value
+      }
+    }
+
+    return converted
+  }
+
+  private static camelCase(str: string): string {
+    return str.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())
+  }
+}
+
 @Component
 export struct Zoo {
   @Prop manager: ZooManager
-  @State currentTemplate: ZooTemplate | null = null
+  @State rootZNode: ZNode | null = null
   @State isLoading: boolean = true
-  @State updateKey: number = 0 // 用于触发UI更新
+  @State updateKey: number = 0
 
   aboutToAppear() {
     ZooLogger.info('Zoo component aboutToAppear')
     this.loadTemplateAndData()
-    // 订阅数据变更
     this.manager.viewModel.subscribe('*', this.onDataChange.bind(this))
   }
 
@@ -45,39 +71,43 @@ export struct Zoo {
 
   onDataChange() {
     this.updateKey++
-    ZooLogger.debug('Zoo component: Data changed, updateKey incremented')
+    this.buildZNodeTree()
+    ZooLogger.debug('Zoo component: Data changed, ZNode tree rebuilt')
   }
 
   async loadTemplateAndData() {
     this.isLoading = true
     try {
       await this.manager.loadInitialData()
-      const viewModelData = this.manager.viewModel.getData()
-
-      // 检查是否有模板指定
-      let template: ZooTemplate | null = null
-
-      // 1. 检查PageResult中是否有template字段
-      const dataLoaderResult = this.manager.viewModel.getData()
-
-      // 2. 检查数据中是否有template字段
-      if (dataLoaderResult && (dataLoaderResult as any).template) {
-        const templateName = (dataLoaderResult as any).template as string
-        template = TemplateRegistry.getTemplate(templateName)
-        if (template) {
-          ZooLogger.info(`Zoo: Using registered template ${templateName}`)
-        }
-      }
-
-      if (template) {
-        this.currentTemplate = template
-      } else {
-        ZooLogger.warn('Zoo: No template found, showing empty page')
-      }
+      this.buildZNodeTree()
     } catch (error) {
       ZooLogger.error(`Zoo: Failed to load template and data - ${error}`)
     } finally {
       this.isLoading = false
+    }
+  }
+
+  buildZNodeTree() {
+    const viewModelData = this.manager.viewModel.getData()
+    let template: ZooTemplate | null = null
+
+    if (viewModelData && (viewModelData as any).template) {
+      const templateName = (viewModelData as any).template as string
+      template = TemplateRegistry.getTemplate(templateName)
+      if (template) {
+        ZooLogger.info(`Zoo: Using registered template ${templateName}`)
+      }
+    }
+
+    if (template) {
+      const dataModel: DataModel = {
+        data: viewModelData
+      }
+      const treeBuilder = new ZNodeTreeBuilder()
+      this.rootZNode = treeBuilder.build(template, dataModel)
+    } else {
+      ZooLogger.warn('Zoo: No template found')
+      this.rootZNode = null
     }
   }
 
@@ -97,8 +127,8 @@ export struct Zoo {
       .height('100%')
       .justifyContent(FlexAlign.Center)
       .alignItems(HorizontalAlign.Center)
-    } else if (this.currentTemplate) {
-      this.buildNode(this.currentTemplate, new Map(), this.currentTemplate.link || {})
+    } else if (this.rootZNode) {
+      this.buildZNode(this.rootZNode)
     } else {
       Column() {
         Text('No template available')
@@ -112,532 +142,407 @@ export struct Zoo {
   }
 
   @Builder
-  buildNode(node: ZooTemplate, forContext: Map<string, any>, linkStyles: Record<string, any>) {
-    if (node.for) {
-      this.buildForNode(node, forContext, linkStyles)
-    } else {
-      this.buildComponent(node, forContext, linkStyles)
-    }
-  }
-
-  @Builder
-  buildForNode(node: ZooTemplate, parentContext: Map<string, any>, linkStyles: Record<string, any>) {
-    const forInfo = ZooParser.parseForExpression(node.for!)
-    if (!forInfo) {
-      ZooLogger.error('Zoo: Invalid for expression')
-      return
-    }
-
-    const listData = this.manager.viewModel.evaluate(forInfo.listName)
-    if (!Array.isArray(listData)) {
-      ZooLogger.error(`Zoo: ${forInfo.listName} is not an array`)
-      return
-    }
-
-    ForEach(listData, (item: any, index: number) => {
-      const forCtx = new Map<string, any>(parentContext)
-      forCtx.set(forInfo.itemName, item)
-      forCtx.set('$' + forInfo.itemName, index)
-
-      if (node.children) {
-        ForEach(node.children, (child: ZooTemplate, idx: number) => {
-          this.buildNode(child, forCtx, linkStyles)
-        })
-      }
-    })
-  }
-
-  @Builder
-  buildComponent(node: ZooTemplate, forContext: Map<string, any>, linkStyles: Record<string, any>) {
-    const type = node.type.toLowerCase()
-    const style = this.getMergedStyle(node, linkStyles, forContext)
-    const data = this.resolveData(node.data, forContext)
-    const event = this.resolveEvents(node.event)
+  buildZNode(znode: ZNode) {
+    const type = znode.type.toLowerCase()
+    const style = StyleConverter.convert(znode.style)
+    const event = znode.event || {}
 
     switch (type) {
       case 'column':
-        this.buildColumn(node, style, event, forContext, linkStyles)
+        this.buildColumn(znode, style, event)
         break
       case 'row':
-        this.buildRow(node, style, event, forContext, linkStyles)
+        this.buildRow(znode, style, event)
         break
       case 'stack':
-        this.buildStack(node, style, event, forContext, linkStyles)
+        this.buildStack(znode, style, event)
         break
       case 'flex':
-        this.buildFlex(node, style, event, forContext, linkStyles)
+        this.buildFlex(znode, style, event)
         break
       case 'text':
-        this.buildText(node, style, data)
+        this.buildText(znode, style)
         break
       case 'image':
-        this.buildImage(node, style, data)
+        this.buildImage(znode, style)
         break
       case 'button':
-        this.buildButton(node, style, data, event)
+        this.buildButton(znode, style, event)
         break
       case 'input':
       case 'textinput':
-        this.buildTextInput(node, style, data, event)
+        this.buildTextInput(znode, style, event)
         break
       case 'checkbox':
-        this.buildCheckbox(node, style, data, event)
+        this.buildCheckbox(znode, style, event)
         break
       case 'radio':
-        this.buildRadio(node, style, data, event)
+        this.buildRadio(znode, style, event)
         break
       case 'switch':
-        this.buildSwitch(node, style, data, event)
+        this.buildSwitch(znode, style, event)
         break
       case 'slider':
-        this.buildSlider(node, style, data, event)
+        this.buildSlider(znode, style, event)
         break
       case 'progress':
-        this.buildProgress(node, style, data)
+        this.buildProgress(znode, style)
         break
       case 'loading':
       case 'loadingprogress':
-        this.buildLoadingProgress(node, style, data)
+        this.buildLoadingProgress(znode, style)
         break
       case 'divider':
-        this.buildDivider(node, style, data)
+        this.buildDivider(znode, style)
         break
       case 'badge':
-        this.buildBadge(node, style, data, forContext, linkStyles)
+        this.buildBadge(znode, style)
         break
       case 'symbol':
-        this.buildSymbol(node, style, data)
+        this.buildSymbol(znode, style)
         break
       default:
-        this.buildDefault(node, style)
+        this.buildDefault(znode)
     }
   }
 
   @Builder
-  buildColumn(node: ZooTemplate, style: any, event: any, forContext: Map<string, any>, linkStyles: Record<string, any>) {
+  buildColumn(znode: ZNode, style: any, event: any) {
     Column() {
-      if (node.children) {
-        ForEach(node.children, (child: ZooTemplate, index: number) => {
-          this.buildNode(child, forContext, linkStyles)
+      if (znode.children) {
+        ForEach(znode.children, (child: ZNode) => {
+          this.buildZNode(child)
         })
       }
     }
-    .width(this.parseLength(style.width))
-    .height(this.parseLength(style.height))
-    .padding(this.parsePadding(style.padding))
-    .margin(this.parseMargin(style.margin))
+    .width(style.width)
+    .height(style.height)
+    .padding(style.padding)
+    .margin(style.margin)
     .backgroundColor(style.backgroundColor)
     .borderStyle(style.borderStyle)
     .borderWidth(style.borderWidth)
     .borderColor(style.borderColor)
-    .borderRadius(this.parseLength(style.borderRadius))
+    .borderRadius(style.borderRadius)
     .alignItems(this.parseAlignItems(style.alignItems))
     .justifyContent(this.parseJustifyContent(style.justifyContent))
-    .onClick(event.onClick)
-    .onTouch(event.onTouch)
-    .onHover(event.onHover)
+    .onClick(this.resolveEventHandler(event.onClick))
+    .onTouch(this.resolveEventHandler(event.onTouch))
+    .onHover(this.resolveEventHandler(event.onHover))
+    .key(this.updateKey)
   }
 
   @Builder
-  buildRow(node: ZooTemplate, style: any, event: any, forContext: Map<string, any>, linkStyles: Record<string, any>) {
+  buildRow(znode: ZNode, style: any, event: any) {
     Row() {
-      if (node.children) {
-        ForEach(node.children, (child: ZooTemplate, index: number) => {
-          this.buildNode(child, forContext, linkStyles)
+      if (znode.children) {
+        ForEach(znode.children, (child: ZNode) => {
+          this.buildZNode(child)
         })
       }
     }
-    .width(this.parseLength(style.width))
-    .height(this.parseLength(style.height))
-    .padding(this.parsePadding(style.padding))
-    .margin(this.parseMargin(style.margin))
+    .width(style.width)
+    .height(style.height)
+    .padding(style.padding)
+    .margin(style.margin)
     .backgroundColor(style.backgroundColor)
     .borderStyle(style.borderStyle)
     .borderWidth(style.borderWidth)
     .borderColor(style.borderColor)
-    .borderRadius(this.parseLength(style.borderRadius))
+    .borderRadius(style.borderRadius)
     .alignItems(this.parseAlignItems(style.alignItems))
     .justifyContent(this.parseJustifyContent(style.justifyContent))
-    .onClick(event.onClick)
-    .onTouch(event.onTouch)
-    .onHover(event.onHover)
+    .onClick(this.resolveEventHandler(event.onClick))
+    .onTouch(this.resolveEventHandler(event.onTouch))
+    .onHover(this.resolveEventHandler(event.onHover))
+    .key(this.updateKey)
   }
 
   @Builder
-  buildStack(node: ZooTemplate, style: any, event: any, forContext: Map<string, any>, linkStyles: Record<string, any>) {
+  buildStack(znode: ZNode, style: any, event: any) {
     Stack() {
-      if (node.children) {
-        ForEach(node.children, (child: ZooTemplate, index: number) => {
-          this.buildNode(child, forContext, linkStyles)
+      if (znode.children) {
+        ForEach(znode.children, (child: ZNode) => {
+          this.buildZNode(child)
         })
       }
     }
-    .width(this.parseLength(style.width))
-    .height(this.parseLength(style.height))
-    .padding(this.parsePadding(style.padding))
-    .margin(this.parseMargin(style.margin))
+    .width(style.width)
+    .height(style.height)
+    .padding(style.padding)
+    .margin(style.margin)
     .backgroundColor(style.backgroundColor)
     .alignContent(this.parseAlignment(style.alignContent))
-    .onClick(event.onClick)
+    .onClick(this.resolveEventHandler(event.onClick))
+    .key(this.updateKey)
   }
 
   @Builder
-  buildFlex(node: ZooTemplate, style: any, event: any, forContext: Map<string, any>, linkStyles: Record<string, any>) {
+  buildFlex(znode: ZNode, style: any, event: any) {
     Flex() {
-      if (node.children) {
-        ForEach(node.children, (child: ZooTemplate, index: number) => {
-          this.buildNode(child, forContext, linkStyles)
+      if (znode.children) {
+        ForEach(znode.children, (child: ZNode) => {
+          this.buildZNode(child)
         })
       }
     }
-    .width(this.parseLength(style.width))
-    .height(this.parseLength(style.height))
-    .padding(this.parsePadding(style.padding))
-    .margin(this.parseMargin(style.margin))
+    .width(style.width)
+    .height(style.height)
+    .padding(style.padding)
+    .margin(style.margin)
     .backgroundColor(style.backgroundColor)
     .direction(this.parseDirection(style.direction))
     .wrap(this.parseWrap(style.wrap))
     .justifyContent(this.parseJustifyContent(style.justifyContent))
     .alignItems(this.parseAlignItems(style.alignItems))
     .alignContent(this.parseAlignContent(style.alignContent))
-    .onClick(event.onClick)
+    .onClick(this.resolveEventHandler(event.onClick))
+    .key(this.updateKey)
   }
 
   @Builder
-  buildText(node: ZooTemplate, style: any, data: any) {
-    Text(data.content || '')
-      .id(node.id || '')
-      .fontSize(this.parseFontSize(style['font-size'] || style.fontSize))
+  buildText(znode: ZNode, style: any) {
+    Text(znode.data?.content || '')
+      .id(znode.id || '')
+      .fontSize(style.fontSize || style['font-size'])
       .fontWeight(this.parseFontWeight(style.fontWeight))
       .fontStyle(this.parseFontStyle(style.fontStyle))
       .fontFamily(style.fontFamily || 'HarmonyOS Sans')
-      .fontColor(style['font-color'] || style.fontColor || style.color || '#000000')
+      .fontColor(style.fontColor || style['font-color'] || style.color || '#000000')
       .textAlign(this.parseTextAlign(style.textAlign))
       .maxLines(style.maxLines || 999)
       .textOverflow({ overflow: this.parseTextOverflow(style.textOverflow) })
-      .width(this.parseLength(style.width))
-      .height(this.parseLength(style.height))
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
+      .width(style.width)
+      .height(style.height)
+      .padding(style.padding)
+      .margin(style.margin)
       .backgroundColor(style.backgroundColor)
       .borderStyle(style.borderStyle)
       .borderWidth(style.borderWidth)
       .borderColor(style.borderColor)
-      .borderRadius(this.parseLength(style.borderRadius))
+      .borderRadius(style.borderRadius)
+      .key(this.updateKey)
   }
 
   @Builder
-  buildImage(node: ZooTemplate, style: any, data: any) {
-    Image(data.src || '')
-      .id(node.id || '')
-      .width(this.parseLength(style.width) || 100)
-      .height(this.parseLength(style.height) || 100)
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
+  buildImage(znode: ZNode, style: any) {
+    Image(znode.data?.src || '')
+      .id(znode.id || '')
+      .width(style.width || 100)
+      .height(style.height || 100)
+      .padding(style.padding)
+      .margin(style.margin)
       .backgroundColor(style.backgroundColor)
       .borderStyle(style.borderStyle)
       .borderWidth(style.borderWidth)
       .borderColor(style.borderColor)
-      .borderRadius(this.parseLength(style.borderRadius))
+      .borderRadius(style.borderRadius)
       .objectFit(this.parseObjectFit(style.objectFit))
       .alt(style.alt || '')
+      .key(this.updateKey)
   }
 
   @Builder
-  buildButton(node: ZooTemplate, style: any, data: any, event: any) {
-    Button(data.label || 'Button', { type: this.parseButtonType(style.buttonType) })
-      .id(node.id || '')
-      .width(this.parseLength(style.width))
-      .height(this.parseLength(style.height))
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
-      .fontSize(this.parseFontSize(style['font-size'] || style.fontSize))
+  buildButton(znode: ZNode, style: any, event: any) {
+    Button(znode.data?.label || 'Button', { type: this.parseButtonType(style.buttonType) })
+      .id(znode.id || '')
+      .width(style.width)
+      .height(style.height)
+      .padding(style.padding)
+      .margin(style.margin)
+      .fontSize(style.fontSize || style['font-size'])
       .fontWeight(this.parseFontWeight(style.fontWeight))
-      .fontColor(style['font-color'] || style.fontColor || style.color || '#FFFFFF')
+      .fontColor(style.fontColor || style['font-color'] || style.color || '#FFFFFF')
       .backgroundColor(style.backgroundColor || '#4CAF50')
       .borderStyle(style.borderStyle)
       .borderWidth(style.borderWidth)
       .borderColor(style.borderColor)
-      .borderRadius(this.parseLength(style.borderRadius || 10))
-      .onClick(event.onClick)
-      .onTouch(event.onTouch)
-      .onHover(event.onHover)
+      .borderRadius(style.borderRadius || 10)
+      .onClick(this.resolveEventHandler(event.onClick))
+      .onTouch(this.resolveEventHandler(event.onTouch))
+      .onHover(this.resolveEventHandler(event.onHover))
+      .key(this.updateKey)
   }
 
   @Builder
-  buildTextInput(node: ZooTemplate, style: any, data: any, event: any) {
-    TextInput({ placeholder: data.placeholder, text: data.text || '' })
-      .id(node.id || '')
-      .width(this.parseLength(style.width))
-      .height(this.parseLength(style.height || 40))
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
-      .fontSize(this.parseFontSize(style['font-size'] || style.fontSize))
-      .fontColor(style['font-color'] || style.fontColor || style.color || '#000000')
+  buildTextInput(znode: ZNode, style: any, event: any) {
+    TextInput({ placeholder: znode.data?.placeholder, text: znode.data?.text || '' })
+      .id(znode.id || '')
+      .width(style.width)
+      .height(style.height || 40)
+      .padding(style.padding)
+      .margin(style.margin)
+      .fontSize(style.fontSize || style['font-size'])
+      .fontColor(style.fontColor || style['font-color'] || style.color || '#000000')
       .placeholderColor(style.placeholderColor || '#999999')
       .backgroundColor(style.backgroundColor || '#FFFFFF')
       .borderStyle(style.borderStyle)
       .borderWidth(style.borderWidth)
       .borderColor(style.borderColor)
-      .borderRadius(this.parseLength(style.borderRadius || 8))
-      .onChange(event.onChange)
-      .onFocus(event.onFocus)
-      .onBlur(event.onBlur)
+      .borderRadius(style.borderRadius || 8)
+      .onChange(this.resolveEventHandler(event.onChange))
+      .onFocus(this.resolveEventHandler(event.onFocus))
+      .onBlur(this.resolveEventHandler(event.onBlur))
+      .key(this.updateKey)
   }
 
   @Builder
-  buildCheckbox(node: ZooTemplate, style: any, data: any, event: any) {
+  buildCheckbox(znode: ZNode, style: any, event: any) {
     Checkbox()
-      .id(node.id || '')
-      .width(this.parseLength(style.width))
-      .height(this.parseLength(style.height))
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
-      .select(data.checked || false)
+      .id(znode.id || '')
+      .width(style.width)
+      .height(style.height)
+      .padding(style.padding)
+      .margin(style.margin)
+      .select(znode.data?.checked || false)
       .selectedColor(style.selectedColor || '#4CAF50')
-      .onChange(event.onChange)
+      .onChange(this.resolveEventHandler(event.onChange))
+      .key(this.updateKey)
   }
 
   @Builder
-  buildRadio(node: ZooTemplate, style: any, data: any, event: any) {
-    Radio({ value: data.value || '', group: data.group || '' })
-      .id(node.id || '')
-      .width(this.parseLength(style.width))
-      .height(this.parseLength(style.height))
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
-      .checked(data.checked || false)
-      .onChange(event.onChange)
+  buildRadio(znode: ZNode, style: any, event: any) {
+    Radio({ value: znode.data?.value || '', group: znode.data?.group || '' })
+      .id(znode.id || '')
+      .width(style.width)
+      .height(style.height)
+      .padding(style.padding)
+      .margin(style.margin)
+      .checked(znode.data?.checked || false)
+      .onChange(this.resolveEventHandler(event.onChange))
+      .key(this.updateKey)
   }
 
   @Builder
-  buildSwitch(node: ZooTemplate, style: any, data: any, event: any) {
+  buildSwitch(znode: ZNode, style: any, event: any) {
     Switch()
-      .id(node.id || '')
-      .width(this.parseLength(style.width))
-      .height(this.parseLength(style.height))
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
-      .checked(data.checked || false)
+      .id(znode.id || '')
+      .width(style.width)
+      .height(style.height)
+      .padding(style.padding)
+      .margin(style.margin)
+      .checked(znode.data?.checked || false)
       .selectedColor(style.selectedColor || '#4CAF50')
-      .onChange(event.onChange)
+      .onChange(this.resolveEventHandler(event.onChange))
+      .key(this.updateKey)
   }
 
   @Builder
-  buildSlider(node: ZooTemplate, style: any, data: any, event: any) {
-    Slider({ value: data.value || 0, min: data.min || 0, max: data.max || 100, step: data.step || 1 })
-      .id(node.id || '')
-      .width(this.parseLength(style.width))
-      .height(this.parseLength(style.height))
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
+  buildSlider(znode: ZNode, style: any, event: any) {
+    Slider({ 
+      value: znode.data?.value || 0, 
+      min: znode.data?.min || 0, 
+      max: znode.data?.max || 100, 
+      step: znode.data?.step || 1 
+    })
+      .id(znode.id || '')
+      .width(style.width)
+      .height(style.height)
+      .padding(style.padding)
+      .margin(style.margin)
       .blockColor(style.blockColor || '#4CAF50')
       .trackColor(style.trackColor || '#E0E0E0')
       .selectedColor(style.selectedColor || '#4CAF50')
-      .onChange(event.onChange)
+      .onChange(this.resolveEventHandler(event.onChange))
+      .key(this.updateKey)
   }
 
   @Builder
-  buildProgress(node: ZooTemplate, style: any, data: any) {
-    Progress({ value: data.value || 0, total: data.total || 100, type: this.parseProgressType(style.type) })
-      .id(node.id || '')
-      .width(this.parseLength(style.width || 200))
-      .height(this.parseLength(style.height || 10))
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
+  buildProgress(znode: ZNode, style: any) {
+    Progress({ 
+      value: znode.data?.value || 0, 
+      total: znode.data?.total || 100, 
+      type: this.parseProgressType(style.type) 
+    })
+      .id(znode.id || '')
+      .width(style.width || 200)
+      .height(style.height || 10)
+      .padding(style.padding)
+      .margin(style.margin)
       .color(style.color || '#4CAF50')
       .backgroundColor(style.backgroundColor || '#E0E0E0')
+      .key(this.updateKey)
   }
 
   @Builder
-  buildLoadingProgress(node: ZooTemplate, style: any, data: any) {
+  buildLoadingProgress(znode: ZNode, style: any) {
     LoadingProgress()
-      .id(node.id || '')
-      .width(this.parseLength(style.width || 48))
-      .height(this.parseLength(style.height || 48))
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
+      .id(znode.id || '')
+      .width(style.width || 48)
+      .height(style.height || 48)
+      .padding(style.padding)
+      .margin(style.margin)
       .color(style.color || '#4CAF50')
+      .key(this.updateKey)
   }
 
   @Builder
-  buildDivider(node: ZooTemplate, style: any, data: any) {
+  buildDivider(znode: ZNode, style: any) {
     Divider()
-      .id(node.id || '')
-      .width(this.parseLength(style.width || '100%'))
-      .height(this.parseLength(style.height || 1))
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
+      .id(znode.id || '')
+      .width(style.width || '100%')
+      .height(style.height || 1)
+      .padding(style.padding)
+      .margin(style.margin)
       .vertical(style.vertical || false)
       .color(style.color || '#E0E0E0')
       .strokeWidth(style.strokeWidth || 1)
+      .key(this.updateKey)
   }
 
   @Builder
-  buildBadge(node: ZooTemplate, style: any, data: any, forContext: Map<string, any>, linkStyles: Record<string, any>) {
+  buildBadge(znode: ZNode, style: any) {
     Badge({
-      count: data.count || 0,
+      count: znode.data?.count || 0,
       style: {
         badgeSize: style.badgeSize || 12,
         badgeColor: style.badgeColor || '#FF0000'
       }
     }) {
-      if (node.children && node.children.length > 0) {
-        this.buildNode(node.children[0], forContext, linkStyles)
+      if (znode.children && znode.children.length > 0) {
+        this.buildZNode(znode.children[0])
       }
     }
-    .id(node.id || '')
+    .id(znode.id || '')
+    .key(this.updateKey)
   }
 
   @Builder
-  buildSymbol(node: ZooTemplate, style: any, data: any) {
-    SymbolGlyph(data.value || $r('sys.symbol.oh_logo'))
-      .id(node.id || '')
-      .fontSize(this.parseFontSize(style['font-size'] || style.fontSize || 24))
-      .fontColor(style['font-color'] || style.fontColor || '#000000')
+  buildSymbol(znode: ZNode, style: any) {
+    SymbolGlyph(znode.data?.value || $r('sys.symbol.oh_logo'))
+      .id(znode.id || '')
+      .fontSize(style.fontSize || style['font-size'] || 24)
+      .fontColor(style.fontColor || style['font-color'] || '#000000')
       .renderingStrategy(this.parseSymbolRenderingStrategy(style.renderingStrategy))
-      .width(this.parseLength(style.width))
-      .height(this.parseLength(style.height))
-      .padding(this.parsePadding(style.padding))
-      .margin(this.parseMargin(style.margin))
+      .width(style.width)
+      .height(style.height)
+      .padding(style.padding)
+      .margin(style.margin)
+      .key(this.updateKey)
   }
 
   @Builder
-  buildDefault(node: ZooTemplate, style: any) {
+  buildDefault(znode: ZNode) {
     Column() {
-      Text(`Unsupported type: ${node.type}`)
+      Text(`Unsupported type: ${znode.type}`)
         .fontSize(12)
         .fontColor('#FF0000')
     }
-    .width(this.parseLength(style.width))
-    .height(this.parseLength(style.height))
-    .padding(this.parsePadding(style.padding))
-    .margin(this.parseMargin(style.margin))
+    .key(this.updateKey)
   }
 
-  // 合并样式，考虑优先级：内联样式 > ID选择器 > 类选择器
-  private getMergedStyle(node: ZooTemplate, linkStyles: Record<string, any>, forContext: Map<string, any>): any {
-    const merged: any = {}
-
-    // 类选择器样式
-    if (node.class) {
-      const classes = node.class.trim().split(/\s+/).filter(Boolean)
-      classes.forEach(className => {
-        const selector = '.' + className
-        const classStyle = linkStyles[selector]
-        if (classStyle) {
-          Object.assign(merged, this.resolveStyle(classStyle, forContext))
-        }
-      })
-    }
-
-    // ID选择器样式
-    if (node.id) {
-      const idSelector = '#' + node.id
-      const idStyle = linkStyles[idSelector]
-      if (idStyle) {
-        Object.assign(merged, this.resolveStyle(idStyle, forContext))
-      }
-    }
-
-    // 内联样式（最高优先级）
-    if (node.style) {
-      Object.assign(merged, this.resolveStyle(node.style, forContext))
-    }
-
-    return merged
-  }
-
-  private resolveStyle(style: any, forContext: Map<string, any>): any {
-    if (!style) {
-      return {}
-    }
-
-    const resolved: any = {}
-    for (const key in style) {
-      const value = style[key]
-      if (typeof value === 'string' && ZooParser.isBindingExpression(value)) {
-        resolved[key] = this.resolveBinding(value, forContext)
-      } else if (typeof value === 'object' && value !== null) {
-        resolved[key] = this.resolveStyle(value, forContext)
+  private resolveEventHandler(handler: any): any {
+    if (typeof handler === 'string') {
+      const methodName = handler.trim()
+      if (this.manager && (this.manager as any)[methodName]) {
+        return (this.manager as any)[methodName].bind(this.manager)
       } else {
-        resolved[key] = value
+        ZooLogger.warn(`Zoo: Event handler method ${methodName} not found`)
       }
+    } else if (typeof handler === 'function') {
+      return handler
     }
-    return resolved
-  }
-
-  private resolveData(data: any, forContext: Map<string, any>): any {
-    if (!data) {
-      return {}
-    }
-
-    const resolved: any = {}
-    for (const key in data) {
-      const value = data[key]
-      if (typeof value === 'string') {
-        if (ZooParser.isStringLiteral(value)) {
-          resolved[key] = ZooParser.extractStringLiteral(value)
-        } else if (ZooParser.isBindingExpression(value)) {
-          resolved[key] = this.resolveBinding(value, forContext)
-        } else {
-          resolved[key] = value
-        }
-      } else {
-        resolved[key] = value
-      }
-    }
-    return resolved
-  }
-
-  private resolveBinding(expression: string, forContext: Map<string, any>): any {
-    const match = expression.match(/\{\{([^}]+)\}\}/)
-    if (match) {
-      const expr = match[1].trim()
-      const context: Record<string, any> = {}
-
-      for (const [key, value] of forContext) {
-        context[key] = value
-      }
-
-      const data = this.manager.viewModel.getData()
-      for (const key in data) {
-        context[key] = data[key]
-      }
-
-      try {
-        const keys = Object.keys(context)
-        const values = Object.values(context)
-        const func = new Function(...keys, `return ${expr}`)
-        return func(...values)
-      } catch (e) {
-        ZooLogger.error(`Zoo: Failed to resolve binding ${expression}: ${e}`)
-        return ''
-      }
-    }
-    return expression
-  }
-
-  private resolveEvents(event: any): any {
-    if (!event) {
-      return {}
-    }
-
-    const resolved: any = {}
-    for (const key in event) {
-      const handler = event[key]
-      if (typeof handler === 'string') {
-        const methodName = handler.trim()
-        if (this.manager && (this.manager as any)[methodName]) {
-          resolved[key] = (this.manager as any)[methodName].bind(this.manager)
-        } else {
-          ZooLogger.warn(`Zoo: Event handler method ${methodName} not found`)
-        }
-      } else if (typeof handler === 'function') {
-        resolved[key] = handler
-      }
-    }
-    return resolved
+    return undefined
   }
 
   private parseLength(value: any): Length {
@@ -657,57 +562,6 @@ export struct Zoo {
       return value
     }
     return value
-  }
-
-  private parseFontSize(value: any): Length {
-    if (typeof value === 'number') {
-      return value
-    }
-    return this.parseLength(value)
-  }
-
-  private parsePadding(value: any): Length | LocalizedPadding {
-    if (!value) {
-      return 0
-    }
-    if (typeof value === 'number') {
-      return value
-    }
-    if (typeof value === 'string') {
-      return this.parseLength(value)
-    }
-    if (typeof value === 'object') {
-      const vp = value as Record<string, any>
-      return {
-        top: this.parseLength(vp.top),
-        bottom: this.parseLength(vp.bottom),
-        left: this.parseLength(vp.left),
-        right: this.parseLength(vp.right)
-      }
-    }
-    return 0
-  }
-
-  private parseMargin(value: any): Length | LocalizedMargin {
-    if (!value) {
-      return 0
-    }
-    if (typeof value === 'number') {
-      return value
-    }
-    if (typeof value === 'string') {
-      return this.parseLength(value)
-    }
-    if (typeof value === 'object') {
-      const vm = value as Record<string, any>
-      return {
-        top: this.parseLength(vm.top),
-        bottom: this.parseLength(vm.bottom),
-        left: this.parseLength(vm.left),
-        right: this.parseLength(vm.right)
-      }
-    }
-    return 0
   }
 
   private parseAlignItems(align: string): HorizontalAlign {

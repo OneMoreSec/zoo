@@ -1,3 +1,5 @@
+import { FrameNode, UIContext } from '@kit.ArkUI'
+
 // 数据值类型
 type DataValueType = string | number | boolean | DataModel
     | Record<string, DataValueType> | Array<DataValueType>
@@ -35,4 +37,29 @@ export interface ZooTemplate {
 // 带名称的模板接口
 export interface ZooTemplateWithName extends ZooTemplate {
     name: string
+}
+
+// ZNode接口 - 对应component.md中的定义
+export interface ZNode {
+    type: string
+    parent?: ZNode
+    children?: ZNode[]
+    data?: ESObject
+    style?: ESObject
+    id?: string
+    class?: string[]
+    event?: ESObject
+}
+
+// ZComponent接口 - 对应component.md中的定义
+export interface ZComponent {
+    construct(uiContext: UIContext, znode: ZNode): void
+    getFrameNode(): FrameNode
+    getZNode(): ZNode
+}
+
+// 组件选项接口
+export interface ComponentOption {
+    name: string,   // 组件名称，用于在Template中引用
+    builder: (uiContext: UIContext, znode: ZNode) => ZComponent
 }

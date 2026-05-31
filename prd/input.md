@@ -121,3 +121,5 @@ Column
         Image('http://image2.png')
         Text('app2')
 ```
+### Template和DataModel之间的关系
+Template用于描述页面的节点结构，DataModel用于构建页面时数据绑定表达式的输入。一个ArkUI页面需要获取到到Template和DataModel才能构建出来。
